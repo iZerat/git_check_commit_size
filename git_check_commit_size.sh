@@ -253,7 +253,7 @@ main() {
         fi
         
         # 显示当前正在分析的提交
-        echo -e "${NC}分析提交 ${YELLOW}$((commit_count+1))${PURPLE}/${num_commits}: ${PURPLE}${commit_hash:0:8}${NC} - ${commit_msg}"
+        echo -e "${NC}分析提交 ${YELLOW}$((commit_count+1))${NC}/${num_commits}: ${PURPLE}${commit_hash:0:8}${NC} - ${commit_msg}"
         
         # 先获取变更文件数量
         local file_count
