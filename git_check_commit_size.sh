@@ -286,7 +286,7 @@ main() {
         total_bytes=$((total_bytes + size_bytes))
         
         # 显示当前提交大小
-        echo -e "  ${CYAN}变更文件: ${GREEN}${file_count}${CYAN} 个，体积: ${GREEN}$formatted_size${NC} ($size_bytes 字节)"
+        echo -e "  ${CYAN}变更文件数量: ${GREEN}${file_count}${CYAN} 个，变更体积: ${GREEN}$formatted_size${NC} ($size_bytes 字节)"
         echo ""
         
         # 增加计数
@@ -323,8 +323,8 @@ main() {
         # 截断过长的信息
         short_hash="${commit_hashes[$i]:0:8}"
         short_msg="${commit_msgs[$i]}"
-        if [ ${#short_msg} -gt 6 ]; then
-            short_msg="${short_msg:0:5}..."
+        if [ ${#short_msg} -gt 8 ]; then
+            short_msg="${short_msg:0:8}..."
         fi
         
         printf "${YELLOW}%-4s${NC} ${CYAN}%-12s${NC} ${PURPLE}%-12s${NC} ${NC}%-8s${NC} ${GREEN}%-15s${NC} ${WHITE}%-15s${NC}\n" \
@@ -369,7 +369,7 @@ main() {
         done
         
         echo -e "${CYAN}最大变更提交: ${YELLOW}$((max_index+1))${CYAN}. ${PURPLE}${commit_hashes[$max_index]:0:8}${CYAN} (${commit_dates[$max_index]})${NC}"
-        echo -e "${CYAN}变更文件数: ${NC}${commit_file_counts[$max_index]}${CYAN}，变更体积: ${GREEN}${commit_formatted_sizes[$max_index]}${NC}"
+        echo -e "${CYAN}变更文件数量: ${NC}${commit_file_counts[$max_index]}${CYAN}，变更体积: ${GREEN}${commit_formatted_sizes[$max_index]}${NC}"
         echo -e "${CYAN}提交信息: ${NC}${commit_msgs[$max_index]}${NC}"
         echo -e ""
     fi
@@ -386,7 +386,7 @@ main() {
         done
         
         echo -e "${CYAN}最小变更提交: ${YELLOW}$((min_index+1))${CYAN}. ${PURPLE}${commit_hashes[$min_index]:0:8}${CYAN} (${commit_dates[$min_index]})${NC}"
-        echo -e "${CYAN}变更文件数: ${NC}${commit_file_counts[$min_index]}${CYAN}，变更体积: ${GREEN}${commit_formatted_sizes[$min_index]}${NC}"
+        echo -e "${CYAN}变更文件数量: ${NC}${commit_file_counts[$min_index]}${CYAN}，变更体积: ${GREEN}${commit_formatted_sizes[$min_index]}${NC}"
         echo -e "${CYAN}提交信息: ${NC}${commit_msgs[$min_index]}${NC}"
     fi
     
