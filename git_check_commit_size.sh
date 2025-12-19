@@ -16,6 +16,7 @@ ORANGE='\033[0;33m'
 BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
+WHITE='\033[1;37m'
 NC='\033[0m' # No Color
 
 # 显示帮助信息
@@ -217,17 +218,17 @@ get_commit_changed_size_accurate() {
             if [ "$insertions" -gt 0 ]; then
                 # 假设平均每行100字节
                 size_bytes=$((insertions * 100))
-                echo -e "  ${BLUE}DEBUG: 使用插入行数估算: $insertions 行 * 100字节/行 = $size_bytes 字节${NC}" >&2
+                echo -e "  ${BLUE}使用插入行数估算: $insertions 行 * 100字节/行 = $size_bytes 字节${NC}" >&2
             else
                 # 如果无法获取插入行数，使用文件数量估算
                 if [ "$files_changed" -gt 0 ]; then
                     # 每个文件平均5KB
                     size_bytes=$((files_changed * 5120))
-                    echo -e "  ${BLUE}DEBUG: 使用文件数量估算: $files_changed 个文件 * 5120字节/文件 = $size_bytes 字节${NC}" >&2
+                    echo -e "  ${BLUE}使用文件数量估算: $files_changed 个文件 * 5120字节/文件 = $size_bytes 字节${NC}" >&2
                 else
                     # 默认估算为10KB
                     size_bytes=10240
-                    echo -e "  ${BLUE}DEBUG: 使用默认估算: 10240 字节${NC}" >&2
+                    echo -e "  ${BLUE}使用默认估算: 10240 字节${NC}" >&2
                 fi
             fi
         fi
@@ -470,7 +471,7 @@ main() {
     if [ "$commit_count" -eq 0 ]; then
         echo -e "${RED}错误: 没有找到提交记录${NC}"
         if $PAUSE_AFTER_COMPLETE; then
-            echo -e "\n${YELLOW}按任意键退出...${NC}"
+            echo -e "\n${WHITE}按任意键退出...${NC}"
             read -n 1 -s -r
         fi
         exit 1
@@ -500,11 +501,11 @@ main() {
             display_hash="${PURPLE}${short_hash}${NC}    "
         fi
         
-        # 设置颜色变量
-        WHITE='\033[1;37m'
+
+
         
         # 打印表格行，注意哈希列已经是12位宽度了
-        printf "${YELLOW}%-4s${NC} ${CYAN}%-12s${NC} ${display_hash} ${NC}%-7s${NC} ${GREEN}%-16s${NC} ${WHITE}%-15s${NC}\n" \
+        printf "${YELLOW}%-4s${NC} ${CYAN}%-12s${NC} ${display_hash} ${NC}%-7s${NC} ${GREEN}%-16s${NC} ${NC}%-15s${NC}\n" \
             "$((i+1))" "${commit_dates[$i]}" "${commit_file_counts[$i]}" "${commit_formatted_sizes[$i]}" "$short_msg"
     done
     
@@ -588,7 +589,7 @@ main() {
     
     # 完成后暂停
     if $PAUSE_AFTER_COMPLETE; then
-        echo -e "${YELLOW}按任意键退出...${NC}"
+        echo -e "${WHITE}按任意键退出...${NC}"
         read -n 1 -s -r
     fi
 }
