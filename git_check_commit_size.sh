@@ -1,5 +1,5 @@
 #!/bin/bash
-
+# 2版本
 # 脚本名称: git_commit_size.sh
 # 功能: 查询最近n次提交的实际变更文件体积大小
 # 改进版：准确计算每次提交的变更文件大小，优化速度
@@ -12,6 +12,7 @@ PAUSE_AFTER_COMPLETE=true  # 完成后是否暂停
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+ORANGE='\033[0;33m'
 BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
@@ -32,8 +33,6 @@ show_help() {
     echo -e "  $0 1        # 查询最近1次提交"
     echo -e "  $0 -h       # 显示帮助信息"
     echo ""
-    
-
 }
 
 # 检查是否支持bc命令，如果不支持则使用awk
@@ -74,23 +73,80 @@ format_size() {
     fi
 }
 
+# 安全的算术运算函数
+safe_add() {
+    local a=$1
+    local b=$2
+    # 确保两个参数都是数字，如果不是则设为0
+    [[ $a =~ ^[0-9]+$ ]] || a=0
+    [[ $b =~ ^[0-9]+$ ]] || b=0
+    echo $((a + b))
+}
+
+# 解析git show --stat输出，获取文件数量和插入行数
+parse_git_show_stat() {
+    local commit_hash=$1
+    local stat_output
+    
+    # 使用git show --stat获取统计信息，取最后一行
+    stat_output=$(git show --stat "$commit_hash" 2>/dev/null | tail -5 | grep -E "(files? changed|insertions|deletions)" | tail -1)
+    
+    local files_changed=0
+    local insertions=0
+    
+    if [ -n "$stat_output" ]; then
+        # 提取文件数量，例如: "3 files changed, 150 insertions(+), 20 deletions(-)"
+        # 或者: "1 file changed, 5 insertions(+)"
+        files_changed=$(echo "$stat_output" | grep -oE '[0-9]+ files? changed' | grep -oE '[0-9]+' || echo "0")
+        
+        # 如果没有匹配到"files changed"，尝试其他格式
+        if [ "$files_changed" = "0" ]; then
+            files_changed=$(echo "$stat_output" | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo "0")
+        fi
+        
+        # 提取插入行数
+        insertions=$(echo "$stat_output" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
+        
+        # 如果没有找到插入行数，尝试其他格式
+        if [ "$insertions" = "0" ]; then
+            insertions=$(echo "$stat_output" | grep -oE '[0-9]+ insertions' | grep -oE '[0-9]+' || echo "0")
+        fi
+    fi
+    
+    echo "$files_changed|$insertions"
+}
+
+# 检查提交是否为初次提交
+is_initial_commit() {
+    local commit_hash=$1
+    
+    # 尝试获取父提交
+    if git rev-parse "${commit_hash}^" > /dev/null 2>&1; then
+        echo "false"
+    else
+        echo "true"
+    fi
+}
+
 # 获取单个提交的变更文件大小（简化但更准确的方法）
 get_commit_changed_size_accurate() {
     local commit_hash=$1
     local size_bytes=0
     
-    # 获取父提交
-    local parent_commit
-    parent_commit=$(git rev-parse "$commit_hash"^ 2>/dev/null || echo "")
+    # 检查是否为初次提交
+    local is_initial
+    is_initial=$(is_initial_commit "$commit_hash")
     
-    if [ -n "$parent_commit" ]; then
+    if [ "$is_initial" = "false" ]; then
         # 有父提交：使用git show --stat并分析实际对象变化
-        # 这个方法更简单：检查本次提交实际创建的新对象大小
+        
+        # 获取父提交
+        local parent_commit
+        parent_commit=$(git rev-parse "${commit_hash}^" 2>/dev/null)
         
         # 获取本次提交创建的所有新对象（blob）
-        # 使用git rev-list获取本次提交引入的所有对象
         local new_objects
-        new_objects=$(git rev-list --objects "$parent_commit".."$commit_hash" 2>/dev/null | \
+        new_objects=$(git rev-list --objects "$parent_commit..$commit_hash" 2>/dev/null | \
                      while read -r hash name; do
                          # 只处理blob对象
                          local obj_type
@@ -111,22 +167,75 @@ get_commit_changed_size_accurate() {
                 if [ -n "$obj_hash" ]; then
                     local obj_size
                     obj_size=$(git cat-file -s "$obj_hash" 2>/dev/null || echo "0")
-                    size_bytes=$((size_bytes + obj_size))
+                    # 使用安全的加法
+                    size_bytes=$(safe_add "$size_bytes" "$obj_size")
                 fi
             done <<< "$unique_objects"
         fi
     else
-        # 初始提交：获取所有文件的大小
+        # 初次提交：使用git ls-tree获取所有文件并计算实际大小
+        # echo -e "  ${CYAN}检测到初次提交，使用git ls-tree分析...${NC}" >&2
+        
+        # 重置大小计数器
+        size_bytes=0
+        
+        # 使用git ls-tree获取初次提交中的所有文件并计算实际大小
+        # 重要：使用临时变量避免子shell问题
+        local total_size=0
         while IFS= read -r line; do
             if [ -n "$line" ]; then
+                # git ls-tree -r -l的输出格式: mode type hash size path
                 local file_size
                 file_size=$(echo "$line" | awk '{print $4}')
-                size_bytes=$((size_bytes + file_size))
+                if [[ $file_size =~ ^[0-9]+$ ]] && [ "$file_size" -gt 0 ]; then
+                    total_size=$((total_size + file_size))
+                fi
             fi
         done < <(git ls-tree -r -l "$commit_hash" 2>/dev/null)
+        
+        size_bytes=$total_size
+        
+        # 如果通过git ls-tree获取到了实际大小，则使用它
+        if [ "$size_bytes" -gt 0 ]; then
+            # echo -e "  ${NC}使用git ls-tree获取的实际大小: $size_bytes 字节${NC}" >&2
+            >&2
+        else
+            # 如果git ls-tree失败，则使用git show --stat估算
+            # echo -e "  ${NC}git ls-tree未获取到大小，使用git show --stat估算${NC}" >&2
+            >&2
+            
+            # 解析git show --stat输出
+            local stat_info
+            stat_info=$(parse_git_show_stat "$commit_hash")
+            IFS='|' read -r files_changed insertions <<< "$stat_info"
+            
+            # 确保files_changed和insertions是数字
+            [[ $files_changed =~ ^[0-9]+$ ]] || files_changed=0
+            [[ $insertions =~ ^[0-9]+$ ]] || insertions=0
+            
+            # 如果有插入行数，使用估算方法
+            if [ "$insertions" -gt 0 ]; then
+                # 假设平均每行100字节
+                size_bytes=$((insertions * 100))
+                echo -e "  ${BLUE}DEBUG: 使用插入行数估算: $insertions 行 * 100字节/行 = $size_bytes 字节${NC}" >&2
+            else
+                # 如果无法获取插入行数，使用文件数量估算
+                if [ "$files_changed" -gt 0 ]; then
+                    # 每个文件平均5KB
+                    size_bytes=$((files_changed * 5120))
+                    echo -e "  ${BLUE}DEBUG: 使用文件数量估算: $files_changed 个文件 * 5120字节/文件 = $size_bytes 字节${NC}" >&2
+                else
+                    # 默认估算为10KB
+                    size_bytes=10240
+                    echo -e "  ${BLUE}DEBUG: 使用默认估算: 10240 字节${NC}" >&2
+                fi
+            fi
+        fi
     fi
     
-    echo "${size_bytes:-0}"
+    # 确保返回的是数字
+    [[ $size_bytes =~ ^[0-9]+$ ]] || size_bytes=0
+    echo "$size_bytes"
 }
 
 # 获取单个提交的变更文件大小（快速方法）
@@ -134,14 +243,14 @@ get_commit_changed_size_fast() {
     local commit_hash=$1
     local size_bytes=0
     
-    # 获取父提交
-    local parent_commit
-    parent_commit=$(git rev-parse "$commit_hash"^ 2>/dev/null || echo "")
+    # 检查是否为初次提交
+    local is_initial
+    is_initial=$(is_initial_commit "$commit_hash")
     
-    if [ -n "$parent_commit" ]; then
+    if [ "$is_initial" = "false" ]; then
         # 有父提交：使用git diff --stat估算
         local stat_output
-        stat_output=$(git diff --shortstat "$parent_commit" "$commit_hash" 2>/dev/null)
+        stat_output=$(git diff --shortstat "${commit_hash}^" "$commit_hash" 2>/dev/null)
         
         if [ -n "$stat_output" ]; then
             # 解析例如: 3 files changed, 150 insertions(+), 20 deletions(-)
@@ -150,6 +259,10 @@ get_commit_changed_size_fast() {
             files_changed=$(echo "$stat_output" | grep -oE '[0-9]+ files?' | grep -oE '[0-9]+' || echo "0")
             insertions=$(echo "$stat_output" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo "0")
             
+            # 确保是数字
+            [[ $files_changed =~ ^[0-9]+$ ]] || files_changed=0
+            [[ $insertions =~ ^[0-9]+$ ]] || insertions=0
+            
             # 简单估算：假设平均每行100字节，每个文件增加50行
             if [ "$files_changed" -gt 0 ]; then
                 # 基于文件数量和插入行数估算
@@ -157,28 +270,62 @@ get_commit_changed_size_fast() {
             fi
         fi
     else
-        # 初始提交：简单估算为10KB
-        size_bytes=10240
+        # 初次提交：使用git show --stat获取更准确的信息
+        echo -e "  ${CYAN}检测到初次提交，使用git show --stat分析...${NC}" >&2
+        
+        # 解析git show --stat输出
+        local stat_info
+        stat_info=$(parse_git_show_stat "$commit_hash")
+        IFS='|' read -r files_changed insertions <<< "$stat_info"
+        
+        # 确保是数字
+        [[ $files_changed =~ ^[0-9]+$ ]] || files_changed=0
+        [[ $insertions =~ ^[0-9]+$ ]] || insertions=0
+        
+        # 使用文件数量和插入行数估算
+        if [ "$files_changed" -gt 0 ]; then
+            size_bytes=$((files_changed * 5120 + insertions * 100))
+        else
+            # 默认估算为10KB
+            size_bytes=10240
+        fi
     fi
     
-    echo "${size_bytes:-0}"
+    # 确保返回的是数字
+    [[ $size_bytes =~ ^[0-9]+$ ]] || size_bytes=0
+    echo "$size_bytes"
 }
 
 # 获取单个提交的变更文件数量（用于估算）
 get_commit_file_count() {
     local commit_hash=$1
     
-    # 获取父提交
-    local parent_commit
-    parent_commit=$(git rev-parse "$commit_hash"^ 2>/dev/null || echo "")
+    # 检查是否为初次提交
+    local is_initial
+    is_initial=$(is_initial_commit "$commit_hash")
     
-    if [ -n "$parent_commit" ]; then
+    local file_count=0
+    
+    if [ "$is_initial" = "false" ]; then
         # 有父提交：获取变更文件数量
-        git diff --name-only "$parent_commit" "$commit_hash" 2>/dev/null | wc -l | tr -d ' '
+        file_count=$(git diff --name-only "${commit_hash}^" "$commit_hash" 2>/dev/null | wc -l | tr -d ' ')
     else
-        # 初始提交：获取所有文件数量
-        git ls-tree -r --name-only "$commit_hash" 2>/dev/null | wc -l | tr -d ' '
+        # 初次提交：使用git show --stat获取文件数量
+        local stat_info
+        stat_info=$(parse_git_show_stat "$commit_hash")
+        IFS='|' read -r files_changed insertions <<< "$stat_info"
+        
+        if [[ $files_changed =~ ^[0-9]+$ ]] && [ "$files_changed" -gt 0 ]; then
+            file_count="$files_changed"
+        else
+            # 如果git show --stat没有获取到，尝试git ls-tree
+            file_count=$(git ls-tree -r --name-only "$commit_hash" 2>/dev/null | wc -l | tr -d ' ')
+        fi
     fi
+    
+    # 确保返回的是数字
+    [[ $file_count =~ ^[0-9]+$ ]] || file_count=0
+    echo "$file_count"
 }
 
 # 主函数
@@ -210,7 +357,6 @@ main() {
     fi
     
     echo -e "${CYAN}查询最近 ${NC}${num_commits}${CYAN} 次提交的变更文件体积...${NC}"
-    
     echo ""
     
     # 获取最近的n次提交
@@ -224,6 +370,7 @@ main() {
     declare -a commit_sizes
     declare -a commit_formatted_sizes
     declare -a commit_file_counts
+    declare -a commit_is_initial
     
     # 获取提交信息（包含日期）
     local commit_info
@@ -255,9 +402,20 @@ main() {
         # 显示当前正在分析的提交
         echo -e "${NC}分析提交 ${YELLOW}$((commit_count+1))${NC}/${num_commits}: ${PURPLE}${commit_hash:0:8}${NC} - ${commit_msg}"
         
+        # 检查是否为初次提交
+        local is_initial
+        is_initial=$(is_initial_commit "$commit_hash")
+        
+        if [ "$is_initial" = "true" ]; then
+            echo -e "  ${ORANGE}这是一项初次提交${NC}"
+        fi
+        
         # 先获取变更文件数量
         local file_count
         file_count=$(get_commit_file_count "$commit_hash")
+        
+        # 确保file_count是数字
+        [[ $file_count =~ ^[0-9]+$ ]] || file_count=0
         
         # 根据文件数量选择计算方法
         local size_bytes=0
@@ -271,6 +429,10 @@ main() {
             size_bytes=$(get_commit_changed_size_fast "$commit_hash")
         fi
         
+        # 确保size_bytes是数字（移除可能的换行符）
+        size_bytes=$(echo "$size_bytes" | tr -d '\n')
+        [[ $size_bytes =~ ^[0-9]+$ ]] || size_bytes=0
+        
         # 格式化大小
         formatted_size=$(format_size "$size_bytes")
         
@@ -281,9 +443,10 @@ main() {
         commit_sizes[$commit_count]="$size_bytes"
         commit_formatted_sizes[$commit_count]="$formatted_size"
         commit_file_counts[$commit_count]="$file_count"
+        commit_is_initial[$commit_count]="$is_initial"
         
-        # 累加总大小
-        total_bytes=$((total_bytes + size_bytes))
+        # 累加总大小（使用安全加法）
+        total_bytes=$(safe_add "$total_bytes" "$size_bytes")
         
         # 显示当前提交大小
         echo -e "  ${CYAN}变更文件数量: ${GREEN}${file_count}${CYAN} 个，变更体积: ${GREEN}$formatted_size${NC} ($size_bytes 字节)"
@@ -326,6 +489,17 @@ main() {
         if [ ${#short_msg} -gt 8 ]; then
             short_msg="${short_msg:0:8}..."
         fi
+        
+        # 标记初次提交
+        initial_mark=""
+        if [ "${commit_is_initial[$i]}" = "true" ]; then
+            initial_mark="${GREEN}是${NC}"
+        else
+            initial_mark="${BLUE}否${NC}"
+        fi
+        
+        # 设置颜色变量
+        WHITE='\033[1;37m'
         
         printf "${YELLOW}%-4s${NC} ${CYAN}%-12s${NC} ${PURPLE}%-12s${NC} ${NC}%-8s${NC} ${GREEN}%-15s${NC} ${WHITE}%-15s${NC}\n" \
             "$((i+1))" "${commit_dates[$i]}" "$short_hash" "${commit_file_counts[$i]}" "${commit_formatted_sizes[$i]}" "$short_msg"
@@ -371,6 +545,9 @@ main() {
         echo -e "${CYAN}最大变更提交: ${YELLOW}$((max_index+1))${CYAN}. ${PURPLE}${commit_hashes[$max_index]:0:8}${CYAN} (${commit_dates[$max_index]})${NC}"
         echo -e "${CYAN}变更文件数量: ${NC}${commit_file_counts[$max_index]}${CYAN}，变更体积: ${GREEN}${commit_formatted_sizes[$max_index]}${NC}"
         echo -e "${CYAN}提交信息: ${NC}${commit_msgs[$max_index]}${NC}"
+        # if [ "${commit_is_initial[$max_index]}" = "true" ]; then
+            # echo -e "${CYAN}备注: ${GREEN}这是初次提交${NC}"
+        # fi
         echo -e ""
     fi
     
@@ -388,6 +565,9 @@ main() {
         echo -e "${CYAN}最小变更提交: ${YELLOW}$((min_index+1))${CYAN}. ${PURPLE}${commit_hashes[$min_index]:0:8}${CYAN} (${commit_dates[$min_index]})${NC}"
         echo -e "${CYAN}变更文件数量: ${NC}${commit_file_counts[$min_index]}${CYAN}，变更体积: ${GREEN}${commit_formatted_sizes[$min_index]}${NC}"
         echo -e "${CYAN}提交信息: ${NC}${commit_msgs[$min_index]}${NC}"
+        if [ "${commit_is_initial[$min_index]}" = "true" ]; then
+            echo -e "${CYAN}备注: ${GREEN}这是初次提交${NC}"
+        fi
     fi
     
     echo ""
