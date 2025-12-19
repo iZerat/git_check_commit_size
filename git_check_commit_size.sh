@@ -1,5 +1,5 @@
 #!/bin/bash
-# 2版本
+
 # 脚本名称: git_commit_size.sh
 # 功能: 查询最近n次提交的实际变更文件体积大小
 # 改进版：准确计算每次提交的变更文件大小，优化速度
@@ -356,7 +356,7 @@ main() {
         exit 1
     fi
     
-    echo -e "${CYAN}查询最近 ${NC}${num_commits}${CYAN} 次提交的变更文件体积...${NC}"
+    echo -e "${CYAN}查询最近 ${NC}${num_commits}${CYAN} 次提交的变更体积...${NC}"
     echo ""
     
     # 获取最近的n次提交
@@ -399,15 +399,16 @@ main() {
             continue
         fi
         
-        # 显示当前正在分析的提交
-        echo -e "${NC}分析提交 ${YELLOW}$((commit_count+1))${NC}/${num_commits}: ${PURPLE}${commit_hash:0:8}${NC} - ${commit_msg}"
-        
         # 检查是否为初次提交
         local is_initial
         is_initial=$(is_initial_commit "$commit_hash")
         
+        # 显示当前正在分析的提交
         if [ "$is_initial" = "true" ]; then
-            echo -e "  ${ORANGE}这是一项初次提交${NC}"
+            echo -e "${NC}分析提交 ${YELLOW}$((commit_count+1))${NC}/${num_commits}: ${PURPLE}${commit_hash:0:8}${ORANGE}*${NC} - ${commit_msg}"
+            echo -e "  ${ORANGE}*这个提交是初次提交${NC}"
+        else
+            echo -e "${NC}分析提交 ${YELLOW}$((commit_count+1))${NC}/${num_commits}: ${PURPLE}${commit_hash:0:8}${NC} - ${commit_msg}"
         fi
         
         # 先获取变更文件数量
@@ -449,7 +450,7 @@ main() {
         total_bytes=$(safe_add "$total_bytes" "$size_bytes")
         
         # 显示当前提交大小
-        echo -e "  ${CYAN}变更文件数量: ${GREEN}${file_count}${CYAN} 个，变更体积: ${GREEN}$formatted_size${NC} ($size_bytes 字节)"
+        echo -e "  ${CYAN}变更文件数量: ${NC}${file_count}${CYAN} 个，变更体积: ${GREEN}$formatted_size${NC} ($size_bytes 字节)"
         echo ""
         
         # 增加计数
@@ -490,19 +491,21 @@ main() {
             short_msg="${short_msg:0:8}..."
         fi
         
-        # 标记初次提交
-        initial_mark=""
+        # 如果是初次提交，在哈希值后面加橙色星号，并适当填充空格以保持对齐
         if [ "${commit_is_initial[$i]}" = "true" ]; then
-            initial_mark="${GREEN}是${NC}"
+            # 初次提交：哈希8位 + 星号1位，共9位，我们填充到12位（加3个空格）
+            display_hash="${PURPLE}${short_hash}${ORANGE}*${NC}   "
         else
-            initial_mark="${BLUE}否${NC}"
+            # 非初次提交：哈希8位，填充到12位（加4个空格）
+            display_hash="${PURPLE}${short_hash}${NC}    "
         fi
         
         # 设置颜色变量
         WHITE='\033[1;37m'
         
-        printf "${YELLOW}%-4s${NC} ${CYAN}%-12s${NC} ${PURPLE}%-12s${NC} ${NC}%-8s${NC} ${GREEN}%-15s${NC} ${WHITE}%-15s${NC}\n" \
-            "$((i+1))" "${commit_dates[$i]}" "$short_hash" "${commit_file_counts[$i]}" "${commit_formatted_sizes[$i]}" "$short_msg"
+        # 打印表格行，注意哈希列已经是12位宽度了
+        printf "${YELLOW}%-4s${NC} ${CYAN}%-12s${NC} ${display_hash} ${NC}%-7s${NC} ${GREEN}%-16s${NC} ${WHITE}%-15s${NC}\n" \
+            "$((i+1))" "${commit_dates[$i]}" "${commit_file_counts[$i]}" "${commit_formatted_sizes[$i]}" "$short_msg"
     done
     
     echo -e "${NC}--------------------------------------------------------------------------------${NC}"
@@ -542,12 +545,16 @@ main() {
             fi
         done
         
-        echo -e "${CYAN}最大变更提交: ${YELLOW}$((max_index+1))${CYAN}. ${PURPLE}${commit_hashes[$max_index]:0:8}${CYAN} (${commit_dates[$max_index]})${NC}"
+        # 如果是初次提交，在哈希值后面加橙色星号
+        if [ "${commit_is_initial[$max_index]}" = "true" ]; then
+            max_hash_display="${PURPLE}${commit_hashes[$max_index]:0:8}${ORANGE}*${NC}"
+        else
+            max_hash_display="${PURPLE}${commit_hashes[$max_index]:0:8}${NC}"
+        fi
+        
+        echo -e "${CYAN}最大变更提交: ${YELLOW}$((max_index+1))${CYAN}. ${max_hash_display}${CYAN} (${commit_dates[$max_index]})${NC}"
         echo -e "${CYAN}变更文件数量: ${NC}${commit_file_counts[$max_index]}${CYAN}，变更体积: ${GREEN}${commit_formatted_sizes[$max_index]}${NC}"
         echo -e "${CYAN}提交信息: ${NC}${commit_msgs[$max_index]}${NC}"
-        # if [ "${commit_is_initial[$max_index]}" = "true" ]; then
-            # echo -e "${CYAN}备注: ${GREEN}这是初次提交${NC}"
-        # fi
         echo -e ""
     fi
     
@@ -562,7 +569,14 @@ main() {
             fi
         done
         
-        echo -e "${CYAN}最小变更提交: ${YELLOW}$((min_index+1))${CYAN}. ${PURPLE}${commit_hashes[$min_index]:0:8}${CYAN} (${commit_dates[$min_index]})${NC}"
+        # 如果是初次提交，在哈希值后面加橙色星号
+        if [ "${commit_is_initial[$min_index]}" = "true" ]; then
+            min_hash_display="${PURPLE}${commit_hashes[$min_index]:0:8}${ORANGE}*${NC}"
+        else
+            min_hash_display="${PURPLE}${commit_hashes[$min_index]:0:8}${NC}"
+        fi
+        
+        echo -e "${CYAN}最小变更提交: ${YELLOW}$((min_index+1))${CYAN}. ${min_hash_display}${CYAN} (${commit_dates[$min_index]})${NC}"
         echo -e "${CYAN}变更文件数量: ${NC}${commit_file_counts[$min_index]}${CYAN}，变更体积: ${GREEN}${commit_formatted_sizes[$min_index]}${NC}"
         echo -e "${CYAN}提交信息: ${NC}${commit_msgs[$min_index]}${NC}"
         if [ "${commit_is_initial[$min_index]}" = "true" ]; then
