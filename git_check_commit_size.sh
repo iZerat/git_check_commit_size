@@ -471,7 +471,7 @@ main() {
     if [ "$commit_count" -eq 0 ]; then
         echo -e "${RED}错误: 没有找到提交记录${NC}"
         if $PAUSE_AFTER_COMPLETE; then
-            echo -e "\n${WHITE}按任意键退出...${NC}"
+            echo -e "\n${YELLOW}按任意键退出...${NC}"
             read -n 1 -s -r
         fi
         exit 1
@@ -589,7 +589,7 @@ main() {
     
     # 完成后暂停
     if $PAUSE_AFTER_COMPLETE; then
-        echo -e "${WHITE}按任意键退出...${NC}"
+        echo -e "${YELLOW}按任意键退出...${NC}"
         read -n 1 -s -r
     fi
 }
