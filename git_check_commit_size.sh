@@ -2,7 +2,7 @@
 
 # 脚本名称: git_commit_size.sh
 # 功能: 查询最近n次提交的实际变更文件体积大小
-# 改进版：准确计算每次提交的变更文件大小，优化速度
+# 改进版：准确计算每次提交的变更文件大小，优化速度，并正确处理重命名文件
 
 # 设置默认提交次数
 DEFAULT_COMMITS=5
@@ -129,6 +129,87 @@ is_initial_commit() {
     fi
 }
 
+# 获取重命名文件列表和详细信息
+get_renamed_files() {
+    local parent_commit=$1
+    local commit_hash=$2
+    
+    # 使用git diff --name-status --diff-filter=R 获取重命名文件列表
+    local renamed_files_info
+    renamed_files_info=$(git diff --name-status --diff-filter=R "$parent_commit" "$commit_hash" 2>/dev/null)
+    
+    if [ -z "$renamed_files_info" ]; then
+        echo ""  # 没有重命名文件
+        return
+    fi
+    
+    # 格式: R<tab>旧文件名<tab>新文件名
+    # 创建一个关联数组来存储重命名信息（在bash中，使用declare -A）
+    local rename_map=""
+    
+    while IFS=$'\t' read -r status old_file new_file; do
+        if [ -n "$old_file" ] && [ -n "$new_file" ]; then
+            # 添加到映射字符串中，格式为 "old_file:new_file|old_file2:new_file2|..."
+            if [ -z "$rename_map" ]; then
+                rename_map="${old_file}:${new_file}"
+            else
+                rename_map="${rename_map}|${old_file}:${new_file}"
+            fi
+        fi
+    done <<< "$renamed_files_info"
+    
+    echo "$rename_map"
+}
+
+# 检查文件是否在重命名映射中
+is_file_renamed() {
+    local file_path=$1
+    local rename_map=$2
+    
+    if [ -z "$rename_map" ]; then
+        echo "false"
+        return
+    fi
+    
+    # 检查文件是否作为新文件名存在于重命名映射中
+    IFS='|' read -ra rename_entries <<< "$rename_map"
+    for entry in "${rename_entries[@]}"; do
+        if [ -n "$entry" ]; then
+            IFS=':' read -r old_file new_file <<< "$entry"
+            if [ "$new_file" = "$file_path" ]; then
+                echo "true"
+                return
+            fi
+        fi
+    done
+    
+    echo "false"
+}
+
+# 获取重命名文件的旧文件名
+get_old_filename_for_renamed() {
+    local new_file_path=$1
+    local rename_map=$2
+    
+    if [ -z "$rename_map" ]; then
+        echo ""
+        return
+    fi
+    
+    IFS='|' read -ra rename_entries <<< "$rename_map"
+    for entry in "${rename_entries[@]}"; do
+        if [ -n "$entry" ]; then
+            IFS=':' read -r old_file new_file <<< "$entry"
+            if [ "$new_file" = "$new_file_path" ]; then
+                echo "$old_file"
+                return
+            fi
+        fi
+    done
+    
+    echo ""
+}
+
 # 获取单个提交的变更文件大小（精确方法，计算实际变更字节数）
 get_commit_changed_size_accurate() {
     local commit_hash=$1
@@ -143,41 +224,108 @@ get_commit_changed_size_accurate() {
         local parent_commit
         parent_commit=$(git rev-parse "${commit_hash}^" 2>/dev/null)
         
+        # 获取重命名文件映射
+        local rename_map
+        rename_map=$(get_renamed_files "$parent_commit" "$commit_hash")
+        
         # 获取所有变更文件列表
         local changed_files
         changed_files=$(git diff --name-only "$parent_commit" "$commit_hash" 2>/dev/null)
+        
+        # 统计重命名文件数量
+        local renamed_count=0
+        if [ -n "$rename_map" ]; then
+            renamed_count=$(echo "$rename_map" | grep -o "|" | wc -l)
+            renamed_count=$((renamed_count + 1))  # 加1是因为最后没有管道符
+            # echo -e "  ${BLUE}检测到 ${renamed_count} 个重命名文件${NC}" >&2
+        fi
         
         if [ -n "$changed_files" ]; then
             # 遍历每个变更文件，计算实际变更字节数
             while IFS= read -r file; do
                 if [ -n "$file" ]; then
-                    # 使用git diff获取文件的实际变更内容并计算字节数
-                    # --diff-filter=ACMRT 只考虑添加、复制、修改、重命名、类型变更的文件
-                    # 使用--binary处理二进制文件
-                    local diff_output
-                    diff_output=$(git diff --diff-filter=ACMRT --binary "$parent_commit" "$commit_hash" -- "$file" 2>/dev/null)
+                    # 检查是否为重命名文件
+                    local is_renamed
+                    is_renamed=$(is_file_renamed "$file" "$rename_map")
                     
-                    # 计算差异内容的字节数（排除diff头部信息）
-                    # 对于二进制文件，git diff会显示"Binary files ... differ"，我们需要获取实际文件大小差异
-                    if echo "$diff_output" | grep -q "Binary files"; then
-                        # 二进制文件：计算两个版本的大小差异
-                        local parent_size=$(git show "$parent_commit:$file" 2>/dev/null | wc -c | tr -d ' ')
-                        local current_size=$(git show "$commit_hash:$file" 2>/dev/null | wc -c | tr -d ' ')
-                        local diff_size=$((current_size - parent_size))
-                        # 确保差异为正值（只计算增加的大小）
-                        if [ $diff_size -lt 0 ]; then
-                            diff_size=$((-diff_size))
+                    if [ "$is_renamed" = "true" ]; then
+                        # 重命名文件：只计算文件路径变化的开销，而不是整个文件内容
+                        # 假设文件路径变化平均开销为100字节（路径长度变化）
+                        local old_filename
+                        old_filename=$(get_old_filename_for_renamed "$file" "$rename_map")
+                        
+                        # 计算旧文件名和新文件名的长度差异（字节数）
+                        local old_len=${#old_filename}
+                        local new_len=${#file}
+                        local path_diff=$((new_len - old_len))
+                        if [ $path_diff -lt 0 ]; then
+                            path_diff=$((-path_diff))
                         fi
-                        size_bytes=$(safe_add "$size_bytes" "$diff_size")
+                        
+                        # 重命名操作的开销：路径差异 + 固定开销（元数据变更）
+                        local rename_cost=$((path_diff + 100))
+                        size_bytes=$(safe_add "$size_bytes" "$rename_cost")
+                        
+                        # 显示重命名信息
+                        # echo -e "    ${CYAN}重命名: ${old_filename} -> ${file} (开销: $rename_cost 字节)${NC}" >&2
                     else
-                        # 文本文件：计算差异内容的实际字节数（排除diff元数据）
-                        # 过滤掉diff头部行（以---、+++、@@开头的行）
-                        local content_bytes
-                        content_bytes=$(echo "$diff_output" | grep -v '^---\|^+++\|^@@' | wc -c | tr -d ' ')
-                        size_bytes=$(safe_add "$size_bytes" "$content_bytes")
+                        # 非重命名文件：使用git diff获取文件的实际变更内容并计算字节数
+                        # --diff-filter=ACMT 只考虑添加、复制、修改、类型变更的文件（排除重命名）
+                        local diff_output
+                        diff_output=$(git diff --diff-filter=ACMT --binary "$parent_commit" "$commit_hash" -- "$file" 2>/dev/null)
+                        
+                        # 计算差异内容的字节数（排除diff头部信息）
+                        # 对于二进制文件，git diff会显示"Binary files ... differ"，我们需要获取实际文件大小差异
+                        if echo "$diff_output" | grep -q "Binary files"; then
+                            # 二进制文件：计算两个版本的大小差异
+                            local parent_size=0
+                            local current_size=0
+                            local diff_size=0
+                            
+                            # 获取父提交中的文件大小
+                            if git show "$parent_commit:$file" >/dev/null 2>&1; then
+                                parent_size=$(git show "$parent_commit:$file" 2>/dev/null | wc -c | tr -d ' ')
+                            fi
+                            
+                            # 获取当前提交中的文件大小
+                            if git show "$commit_hash:$file" >/dev/null 2>&1; then
+                                current_size=$(git show "$commit_hash:$file" 2>/dev/null | wc -c | tr -d ' ')
+                            fi
+                            
+                            # 计算大小差异（绝对值）
+                            diff_size=$((current_size - parent_size))
+                            if [ $diff_size -lt 0 ]; then
+                                diff_size=$((-diff_size))
+                            fi
+                            
+                            # 如果没有变化，但git diff报告为二进制文件不同，则可能是权限变化等
+                            if [ $diff_size -eq 0 ]; then
+                                diff_size=100  # 元数据变化的最小开销
+                            fi
+                            
+                            size_bytes=$(safe_add "$size_bytes" "$diff_size")
+                        elif [ -n "$diff_output" ]; then
+                            # 文本文件：计算差异内容的实际字节数（排除diff元数据）
+                            # 过滤掉diff头部行（以---、+++、@@开头的行）
+                            local content_bytes
+                            content_bytes=$(echo "$diff_output" | grep -v '^---\|^+++\|^@@' | wc -c | tr -d ' ')
+                            size_bytes=$(safe_add "$size_bytes" "$content_bytes")
+                        else
+                            # 没有差异输出，可能是元数据变更（如权限、模式变更）
+                            # 给予最小的开销估算
+                            size_bytes=$(safe_add "$size_bytes" "100")
+                        fi
                     fi
                 fi
             done <<< "$changed_files"
+        fi
+        
+        # 如果没有计算到任何变更，可能是因为所有变更都是重命名或元数据变更
+        if [ $size_bytes -eq 0 ] && [ -n "$changed_files" ]; then
+            # 最小开销：每个文件100字节（元数据变更）
+            local file_count
+            file_count=$(echo "$changed_files" | wc -l | tr -d ' ')
+            size_bytes=$((file_count * 100))
         fi
     else
         # 初次提交：使用git ls-tree获取所有文件并计算实际大小
@@ -266,6 +414,20 @@ get_commit_changed_size_fast() {
                 # 基于文件数量和插入行数估算
                 size_bytes=$((files_changed * 5120 + insertions * 100))  # 每个文件5KB + 每行100字节
             fi
+            
+            # 尝试检测重命名文件并调整估算
+            local renamed_files_info
+            renamed_files_info=$(git diff --name-status --diff-filter=R "${commit_hash}^" "$commit_hash" 2>/dev/null | wc -l)
+            if [ "$renamed_files_info" -gt 0 ]; then
+                # 有重命名文件：从估算中减去重命名文件的大小（假设每个重命名文件平均50KB）
+                # 然后加上重命名操作的开销（假设每个100字节）
+                local renamed_adjustment=$((renamed_files_info * 50000 - renamed_files_info * 100))
+                size_bytes=$((size_bytes - renamed_adjustment))
+                if [ $size_bytes -lt 0 ]; then
+                    size_bytes=0
+                fi
+                echo -e "  ${CYAN}快速估算中检测到 ${renamed_files_info} 个重命名文件，已调整估算值${NC}" >&2
+            fi
         fi
     else
         # 初次提交：使用git show --stat获取更准确的信息
@@ -307,6 +469,16 @@ get_commit_file_count() {
     if [ "$is_initial" = "false" ]; then
         # 有父提交：获取变更文件数量
         file_count=$(git diff --name-only "${commit_hash}^" "$commit_hash" 2>/dev/null | wc -l | tr -d ' ')
+        
+        # 减去重命名文件数量（因为重命名不应该计入变更文件数量）
+        local renamed_count
+        renamed_count=$(git diff --name-status --diff-filter=R "${commit_hash}^" "$commit_hash" 2>/dev/null | wc -l | tr -d ' ')
+        file_count=$((file_count - renamed_count))
+        
+        # 确保不会变成负数
+        if [ $file_count -lt 0 ]; then
+            file_count=0
+        fi
     else
         # 初次提交：使用git show --stat获取文件数量
         local stat_info
