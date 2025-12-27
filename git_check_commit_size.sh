@@ -78,7 +78,7 @@ format_size() {
 safe_add() {
     local a=$1
     local b=$2
-    # 确保两个参数都是数字，如果不是则设为0
+    # 确保两个参数都是数字，如果，如果不是则设为0
     [[ $a =~ ^[0-9]+$ ]] || a=0
     [[ $b =~ ^[0-9]+$ ]] || b=0
     echo $((a + b))
@@ -129,7 +129,7 @@ is_initial_commit() {
     fi
 }
 
-# 获取单个提交的变更文件大小（简化但更准确的方法）
+# 获取单个提交的变更文件大小（精确方法，计算实际变更字节数）
 get_commit_changed_size_accurate() {
     local commit_hash=$1
     local size_bytes=0
@@ -139,49 +139,48 @@ get_commit_changed_size_accurate() {
     is_initial=$(is_initial_commit "$commit_hash")
     
     if [ "$is_initial" = "false" ]; then
-        # 有父提交：使用git show --stat并分析实际对象变化
-        
-        # 获取父提交
+        # 有父提交：使用git diff计算实际变更字节数
         local parent_commit
         parent_commit=$(git rev-parse "${commit_hash}^" 2>/dev/null)
         
-        # 获取本次提交创建的所有新对象（blob）
-        local new_objects
-        new_objects=$(git rev-list --objects "$parent_commit..$commit_hash" 2>/dev/null | \
-                     while read -r hash name; do
-                         # 只处理blob对象
-                         local obj_type
-                         obj_type=$(git cat-file -t "$hash" 2>/dev/null)
-                         if [ "$obj_type" = "blob" ]; then
-                             echo "$hash"
-                         fi
-                     done)
+        # 获取所有变更文件列表
+        local changed_files
+        changed_files=$(git diff --name-only "$parent_commit" "$commit_hash" 2>/dev/null)
         
-        # 去重并计算总大小
-        if [ -n "$new_objects" ]; then
-            # 对对象哈希排序去重
-            local unique_objects
-            unique_objects=$(echo "$new_objects" | sort | uniq)
-            
-            # 计算所有唯一对象的总大小
-            while IFS= read -r obj_hash; do
-                if [ -n "$obj_hash" ]; then
-                    local obj_size
-                    obj_size=$(git cat-file -s "$obj_hash" 2>/dev/null || echo "0")
-                    # 使用安全的加法
-                    size_bytes=$(safe_add "$size_bytes" "$obj_size")
+        if [ -n "$changed_files" ]; then
+            # 遍历每个变更文件，计算实际变更字节数
+            while IFS= read -r file; do
+                if [ -n "$file" ]; then
+                    # 使用git diff获取文件的实际变更内容并计算字节数
+                    # --diff-filter=ACMRT 只考虑添加、复制、修改、重命名、类型变更的文件
+                    # 使用--binary处理二进制文件
+                    local diff_output
+                    diff_output=$(git diff --diff-filter=ACMRT --binary "$parent_commit" "$commit_hash" -- "$file" 2>/dev/null)
+                    
+                    # 计算差异内容的字节数（排除diff头部信息）
+                    # 对于二进制文件，git diff会显示"Binary files ... differ"，我们需要获取实际文件大小差异
+                    if echo "$diff_output" | grep -q "Binary files"; then
+                        # 二进制文件：计算两个版本的大小差异
+                        local parent_size=$(git show "$parent_commit:$file" 2>/dev/null | wc -c | tr -d ' ')
+                        local current_size=$(git show "$commit_hash:$file" 2>/dev/null | wc -c | tr -d ' ')
+                        local diff_size=$((current_size - parent_size))
+                        # 确保差异为正值（只计算增加的大小）
+                        if [ $diff_size -lt 0 ]; then
+                            diff_size=$((-diff_size))
+                        fi
+                        size_bytes=$(safe_add "$size_bytes" "$diff_size")
+                    else
+                        # 文本文件：计算差异内容的实际字节数（排除diff元数据）
+                        # 过滤掉diff头部行（以---、+++、@@开头的行）
+                        local content_bytes
+                        content_bytes=$(echo "$diff_output" | grep -v '^---\|^+++\|^@@' | wc -c | tr -d ' ')
+                        size_bytes=$(safe_add "$size_bytes" "$content_bytes")
+                    fi
                 fi
-            done <<< "$unique_objects"
+            done <<< "$changed_files"
         fi
     else
         # 初次提交：使用git ls-tree获取所有文件并计算实际大小
-        # echo -e "  ${CYAN}检测到初次提交，使用git ls-tree分析...${NC}" >&2
-        
-        # 重置大小计数器
-        size_bytes=0
-        
-        # 使用git ls-tree获取初次提交中的所有文件并计算实际大小
-        # 重要：使用临时变量避免子shell问题
         local total_size=0
         while IFS= read -r line; do
             if [ -n "$line" ]; then
@@ -198,11 +197,9 @@ get_commit_changed_size_accurate() {
         
         # 如果通过git ls-tree获取到了实际大小，则使用它
         if [ "$size_bytes" -gt 0 ]; then
-            # echo -e "  ${NC}使用git ls-tree获取的实际大小: $size_bytes 字节${NC}" >&2
             >&2
         else
             # 如果git ls-tree失败，则使用git show --stat估算
-            # echo -e "  ${NC}git ls-tree未获取到大小，使用git show --stat估算${NC}" >&2
             >&2
             
             # 解析git show --stat输出
@@ -500,9 +497,6 @@ main() {
             # 非初次提交：哈希8位，填充到12位（加4个空格）
             display_hash="${PURPLE}${short_hash}${NC}    "
         fi
-        
-
-
         
         # 打印表格行，注意哈希列已经是12位宽度了
         printf "${YELLOW}%-4s${NC} ${CYAN}%-12s${NC} ${display_hash} ${NC}%-7s${NC} ${GREEN}%-16s${NC} ${NC}%-15s${NC}\n" \
