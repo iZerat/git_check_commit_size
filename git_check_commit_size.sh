@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# 脚本名称: git_commit_size.sh
-# 功能: 查询最近n次提交的实际变更文件体积大小
-# 改进版：准确计算每次提交的变更文件大小，优化速度，并正确处理重命名文件
-
 # 设置默认提交次数
 DEFAULT_COMMITS=5
 PAUSE_AFTER_COMPLETE=true  # 完成后是否暂停
@@ -456,7 +452,7 @@ get_commit_changed_size_fast() {
     echo "$size_bytes"
 }
 
-# 获取单个提交的变更文件数量（用于估算）
+# 获取单个提交的变更文件数量（包含重命名的文件）
 get_commit_file_count() {
     local commit_hash=$1
     
@@ -467,13 +463,12 @@ get_commit_file_count() {
     local file_count=0
     
     if [ "$is_initial" = "false" ]; then
-        # 有父提交：获取变更文件数量
+        # 有父提交：获取变更文件数量（包含重命名的文件）
+        # 使用--name-only获取所有变更文件，包括重命名文件
         file_count=$(git diff --name-only "${commit_hash}^" "$commit_hash" 2>/dev/null | wc -l | tr -d ' ')
         
-        # 减去重命名文件数量（因为重命名不应该计入变更文件数量）
-        local renamed_count
-        renamed_count=$(git diff --name-status --diff-filter=R "${commit_hash}^" "$commit_hash" 2>/dev/null | wc -l | tr -d ' ')
-        file_count=$((file_count - renamed_count))
+        # 不再减去重命名文件数量，因为重命名也应计入变更文件数量
+        # 注意：--name-only已经包含了重命名后的新文件名
         
         # 确保不会变成负数
         if [ $file_count -lt 0 ]; then
@@ -581,7 +576,7 @@ main() {
             echo -e "${NC}分析提交 ${YELLOW}$((commit_count+1))${NC}/${num_commits}: ${PURPLE}${commit_hash:0:8}${NC} - ${commit_msg}"
         fi
         
-        # 先获取变更文件数量
+        # 先获取变更文件数量（现在包含重命名的文件）
         local file_count
         file_count=$(get_commit_file_count "$commit_hash")
         
