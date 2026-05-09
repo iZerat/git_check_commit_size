@@ -1,4 +1,4 @@
-Introduction 简介
+Introduction 介绍
 --------
 Can be used to check the change size of the most recent git commits.  
 可以用来查询最近几次git提交的变更体积大小。  
