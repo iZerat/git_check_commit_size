@@ -133,70 +133,183 @@ get_blob_size() {
     echo "$blob_size"
 }
 
-# 获取单个提交的变更文件大小（精确方法）
+# 获取单个提交的变更文件大小（准确方法）
+# 核心逻辑：
+#   - 新增文件：文件完整内容字节数（blob大小）
+#   - 删除文件：被删除文件的blob大小
+#   - 修改的文本文件：统计+/-行的实际内容字节数（去掉前缀符号和diff头）
+#   - 修改的二进制文件：两个版本blob大小差的绝对值
+#   - 重命名且内容未变：0字节
+#   - 重命名且内容有变：按修改计算
 get_commit_changed_size_accurate() {
     local commit_hash=$1
     local size_bytes=0
-    
+
     # 检查是否为初次提交
     local is_initial
     is_initial=$(is_initial_commit "$commit_hash")
-    
+
     if [ "$is_initial" = "false" ]; then
-        # 有父提交：使用git diff精确计算每个文件的变更
         local parent_commit
         parent_commit=$(git rev-parse "${commit_hash}^" 2>/dev/null)
-        
-        # 获取所有变更文件列表（包含重命名、新增、删除、修改）
-        local changed_files
-        changed_files=$(git diff --name-only "$parent_commit" "$commit_hash" 2>/dev/null)
-        
-        if [ -n "$changed_files" ]; then
-            # 遍历每个变更文件
-            while IFS= read -r file; do
-                if [ -n "$file" ]; then
-                    # 获取该文件的完整diff输出（包含二进制信息）
-                    local diff_output
-                    diff_output=$(git diff --binary "$parent_commit" "$commit_hash" -- "$file" 2>/dev/null)
-                    
-                    # 判断是否为二进制文件（diff输出包含"Binary files differ"）
-                    if echo "$diff_output" | grep -q "Binary files differ"; then
-                        # 二进制文件：使用两个版本blob大小差的绝对值
-                        local parent_size current_size
-                        parent_size=$(get_blob_size "$parent_commit" "$file")
-                        current_size=$(get_blob_size "$commit_hash" "$file")
-                        local diff_size=$((current_size - parent_size))
-                        if [ $diff_size -lt 0 ]; then
-                            diff_size=$((-diff_size))
-                        fi
-                        # 如果diff_size为0但git报告二进制不同，可能是权限/元数据变化，给予最小开销
-                        if [ $diff_size -eq 0 ]; then
-                            diff_size=100
-                        fi
-                        size_bytes=$(safe_add "$size_bytes" "$diff_size")
-                    else
-                        # 文本文件或重命名/权限变更等：过滤掉上下文行（以空格开头）和@@行
-                        # 保留所有其他行（包括diff头、变更行、rename from/to、new mode等）
-                        local content_bytes
-                        content_bytes=$(echo "$diff_output" | grep -v '^ ' | grep -v '^@@' | wc -c | tr -d ' ')
-                        size_bytes=$(safe_add "$size_bytes" "$content_bytes")
-                    fi
+
+        # 使用git diff --numstat获取文件变更摘要
+        # 格式：added\tdeleted\tpath 或 -\t-\tpath（二进制）
+        local diff_summary
+        diff_summary=$(git diff --numstat --diff-filter=ADMR "$parent_commit" "$commit_hash" 2>/dev/null)
+
+        if [ -n "$diff_summary" ]; then
+            while IFS= read -r line; do
+                [ -z "$line" ] && continue
+
+                # 解析numstat输出
+                local added deleted file_path
+                added=$(echo "$line" | awk '{print $1}')
+                deleted=$(echo "$line" | awk '{print $2}')
+                file_path=$(echo "$line" | cut -f3-)
+
+                if [ -z "$file_path" ]; then
+                    continue
                 fi
-            done <<< "$changed_files"
-        fi
-        
-        # 如果没有任何变更字节数但有文件变更（例如纯重命名且元数据被意外过滤），给予最小估算
-        if [ $size_bytes -eq 0 ] && [ -n "$changed_files" ]; then
-            local file_count
-            file_count=$(echo "$changed_files" | wc -l | tr -d ' ')
-            size_bytes=$((file_count * 100))
+
+                # 判断文件类型和变更类型
+                local file_mode
+                file_mode=$(git diff --diff-filter=ADMR --name-status "$parent_commit" "$commit_hash" -- "$file_path" 2>/dev/null | head -1)
+
+                local change_type="${file_mode:0:1}"
+
+                case "$change_type" in
+                    A)
+                        # 新增文件：获取blob大小
+                        local blob_size
+                        blob_size=$(get_blob_size "$commit_hash" "$file_path")
+                        size_bytes=$(safe_add "$size_bytes" "$blob_size")
+                        ;;
+                    D)
+                        # 删除文件：获取父提交中blob大小
+                        local blob_size
+                        blob_size=$(get_blob_size "$parent_commit" "$file_path")
+                        size_bytes=$(safe_add "$size_bytes" "$blob_size")
+                        ;;
+                    M)
+                        # 修改文件
+                        if [ "$added" = "-" ] && [ "$deleted" = "-" ]; then
+                            # 二进制文件：用blob大小差
+                            local parent_size current_size diff_size
+                            parent_size=$(get_blob_size "$parent_commit" "$file_path")
+                            current_size=$(get_blob_size "$commit_hash" "$file_path")
+                            diff_size=$((current_size - parent_size))
+                            if [ $diff_size -lt 0 ]; then
+                                diff_size=$((-diff_size))
+                            fi
+                            if [ $diff_size -eq 0 ]; then
+                                diff_size=0
+                            fi
+                            size_bytes=$(safe_add "$size_bytes" "$diff_size")
+                        else
+                            # 文本文件：统计实际变更内容的字节数
+                            local file_diff
+                            file_diff=$(git diff --no-ext-diff "$parent_commit" "$commit_hash" -- "$file_path" 2>/dev/null)
+
+                            local content_bytes=0
+                            local line_content
+
+                            while IFS= read -r diff_line; do
+                                # 跳过diff头、元数据行、上下文行、@@行
+                                case "$diff_line" in
+                                    "diff --git"*|"index "*|"--- "*|"+++ "*|"@@"*)
+                                        continue
+                                        ;;
+                                esac
+
+                                # 处理新增行（以+开头但不是+++）
+                                if [[ "$diff_line" == +* ]]; then
+                                    line_content="${diff_line:1}"
+                                    local line_len=${#line_content}
+                                    content_bytes=$((content_bytes + line_len + 1))
+                                fi
+
+                                # 处理删除行（以-开头但不是---）
+                                if [[ "$diff_line" == -* ]]; then
+                                    line_content="${diff_line:1}"
+                                    local line_len=${#line_content}
+                                    content_bytes=$((content_bytes + line_len + 1))
+                                fi
+                            done <<< "$file_diff"
+
+                            size_bytes=$(safe_add "$size_bytes" "$content_bytes")
+                        fi
+                        ;;
+                    R)
+                        # 重命名文件
+                        local rename_info
+                        rename_info=$(git diff --diff-filter=R --name-status "$parent_commit" "$commit_hash" -- 2>/dev/null | grep -F "$file_path")
+
+                        if [ -n "$rename_info" ]; then
+                            local similarity
+                            similarity=$(echo "$rename_info" | grep -oE 'R[0-9]+' | grep -oE '[0-9]+' || echo "0")
+
+                            if [ "$similarity" = "100" ]; then
+                                # 纯重命名，内容未变，体积为0
+                                :
+                            else
+                                # 重命名且内容有变化，按修改处理
+                                local old_path new_path
+                                old_path=$(echo "$rename_info" | awk '{print $2}')
+                                new_path=$(echo "$rename_info" | awk '{print $3}')
+
+                                if [ "$added" = "-" ] && [ "$deleted" = "-" ]; then
+                                    # 二进制
+                                    local parent_size current_size diff_size
+                                    parent_size=$(get_blob_size "$parent_commit" "$old_path")
+                                    current_size=$(get_blob_size "$commit_hash" "$new_path")
+                                    diff_size=$((current_size - parent_size))
+                                    if [ $diff_size -lt 0 ]; then
+                                        diff_size=$((-diff_size))
+                                    fi
+                                    if [ $diff_size -eq 0 ]; then
+                                        diff_size=0
+                                    fi
+                                    size_bytes=$(safe_add "$size_bytes" "$diff_size")
+                                else
+                                    # 文本：计算diff内容
+                                    local file_diff
+                                    file_diff=$(git diff --no-ext-diff "$parent_commit" "$commit_hash" -- "$old_path" "$new_path" 2>/dev/null)
+
+                                    local content_bytes=0
+                                    while IFS= read -r diff_line; do
+                                        case "$diff_line" in
+                                            "diff --git"*|"index "*|"--- "*|"+++ "*|"@@"*)
+                                                continue
+                                                ;;
+                                        esac
+
+                                        if [[ "$diff_line" == +* ]]; then
+                                            line_content="${diff_line:1}"
+                                            local line_len=${#line_content}
+                                            content_bytes=$((content_bytes + line_len + 1))
+                                        fi
+
+                                        if [[ "$diff_line" == -* ]]; then
+                                            line_content="${diff_line:1}"
+                                            local line_len=${#line_content}
+                                            content_bytes=$((content_bytes + line_len + 1))
+                                        fi
+                                    done <<< "$file_diff"
+
+                                    size_bytes=$(safe_add "$size_bytes" "$content_bytes")
+                                fi
+                            fi
+                        fi
+                        ;;
+                esac
+            done <<< "$diff_summary"
         fi
     else
-        # 初次提交：使用git ls-tree获取所有文件大小之和
+        # 初次提交：使用git ls-tree获取所有文件blob大小之和
         local total_size=0
         while IFS= read -r line; do
             if [ -n "$line" ]; then
-                # git ls-tree -r -l输出格式: mode type hash size path
                 local file_size
                 file_size=$(echo "$line" | awk '{print $4}')
                 if [[ $file_size =~ ^[0-9]+$ ]] && [ "$file_size" -gt 0 ]; then
@@ -206,8 +319,7 @@ get_commit_changed_size_accurate() {
         done < <(git ls-tree -r -l "$commit_hash" 2>/dev/null)
         size_bytes=$total_size
     fi
-    
-    # 确保返回数字
+
     [[ $size_bytes =~ ^[0-9]+$ ]] || size_bytes=0
     echo "$size_bytes"
 }
