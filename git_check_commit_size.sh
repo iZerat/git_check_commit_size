@@ -156,17 +156,21 @@ get_commit_changed_size_accurate() {
         # 使用git diff --numstat获取文件变更摘要
         # 格式：added\tdeleted\tpath 或 -\t-\tpath（二进制）
         local diff_summary
-        diff_summary=$(git diff --numstat --diff-filter=ADMR "$parent_commit" "$commit_hash" 2>/dev/null)
+        diff_summary=$(git -c core.quotepath=false diff --numstat --diff-filter=ADMR "$parent_commit" "$commit_hash" 2>/dev/null)
 
         if [ -n "$diff_summary" ]; then
             while IFS= read -r line; do
                 [ -z "$line" ] && continue
 
                 # 解析numstat输出
+                # 注意：git对含特殊字符的路径会加引号，需要去掉
                 local added deleted file_path
                 added=$(echo "$line" | awk '{print $1}')
                 deleted=$(echo "$line" | awk '{print $2}')
                 file_path=$(echo "$line" | cut -f3-)
+
+                # 去掉路径两端可能的引号（git对特殊字符路径会加引号）
+                file_path=$(echo "$file_path" | sed 's/^"//;s/"$//')
 
                 if [ -z "$file_path" ]; then
                     continue
@@ -174,7 +178,7 @@ get_commit_changed_size_accurate() {
 
                 # 判断文件类型和变更类型
                 local file_mode
-                file_mode=$(git diff --diff-filter=ADMR --name-status "$parent_commit" "$commit_hash" -- "$file_path" 2>/dev/null | head -1)
+                file_mode=$(git -c core.quotepath=false diff --diff-filter=ADMR --name-status "$parent_commit" "$commit_hash" -- "$file_path" 2>/dev/null | head -1)
 
                 local change_type="${file_mode:0:1}"
 
@@ -209,7 +213,7 @@ get_commit_changed_size_accurate() {
                         else
                             # 文本文件：统计实际变更内容的字节数
                             local file_diff
-                            file_diff=$(git diff --no-ext-diff "$parent_commit" "$commit_hash" -- "$file_path" 2>/dev/null)
+                            file_diff=$(git -c core.quotepath=false diff --no-ext-diff "$parent_commit" "$commit_hash" -- "$file_path" 2>/dev/null)
 
                             local content_bytes=0
                             local line_content
@@ -243,7 +247,7 @@ get_commit_changed_size_accurate() {
                     R)
                         # 重命名文件
                         local rename_info
-                        rename_info=$(git diff --diff-filter=R --name-status "$parent_commit" "$commit_hash" -- 2>/dev/null | grep -F "$file_path")
+                        rename_info=$(git -c core.quotepath=false diff --diff-filter=R --name-status "$parent_commit" "$commit_hash" -- 2>/dev/null | grep -F "$file_path")
 
                         if [ -n "$rename_info" ]; then
                             local similarity
@@ -274,7 +278,7 @@ get_commit_changed_size_accurate() {
                                 else
                                     # 文本：计算diff内容
                                     local file_diff
-                                    file_diff=$(git diff --no-ext-diff "$parent_commit" "$commit_hash" -- "$old_path" "$new_path" 2>/dev/null)
+                                    file_diff=$(git -c core.quotepath=false diff --no-ext-diff "$parent_commit" "$commit_hash" -- "$old_path" "$new_path" 2>/dev/null)
 
                                     local content_bytes=0
                                     while IFS= read -r diff_line; do
@@ -336,7 +340,7 @@ get_commit_file_count() {
     
     if [ "$is_initial" = "false" ]; then
         # 有父提交：获取变更文件数量（包含重命名文件）
-        file_count=$(git diff --name-only "${commit_hash}^" "$commit_hash" 2>/dev/null | wc -l | tr -d ' ')
+        file_count=$(git -c core.quotepath=false diff --name-only "${commit_hash}^" "$commit_hash" 2>/dev/null | wc -l | tr -d ' ')
         
         # 确保不会变成负数
         if [ $file_count -lt 0 ]; then
